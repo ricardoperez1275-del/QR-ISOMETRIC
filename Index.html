@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Buscador de Isométricos</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsqr/1.4.0/jsQR.js"></script>
+<style>
+  :root {
+    --primary: #1a56db;
+    --primary-dark: #10409e;
+    --bg: #f5f6f8;
+    --card: #ffffff;
+    --text: #1f2430;
+    --muted: #6b7280;
+    --danger: #dc2626;
+    --success: #16a34a;
+    --border: #e5e7eb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    -webkit-tap-highlight-color: transparent;
+  }
+  header {
+    background: var(--primary);
+    color: white;
+    padding: 16px 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  #authStatus { font-size: 13px; opacity: 0.9; }
+  main {
+    max-width: 480px;
+    margin: 0 auto;
+    padding: 16px;
+    padding-bottom: 60px;
+  }
+  .card {
+    background: var(--card);
+    border-radius: 12px;
+    padding: 18px;
+    margin-bottom: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  }
+  button {
+    font-family: inherit;
+    font-size: 15px;
+    font-weight: 600;
+    border: none;
+    border-radius: 10px;
+    padding: 13px 18px;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  button:active { opacity: 0.8; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-primary { background: var(--primary); color: white; width: 100%; }
+  .btn-secondary { background: #eef0f4; color: var(--text); width: 100%; }
+  .btn-danger { background: transparent; color: var(--danger); font-size: 13px; padding: 6px 10px; }
+  .btn-link { background: transparent; color: var(--primary); font-size: 13px; padding: 6px 10px; text-decoration: underline; }
+  #video {
+    width: 100%;
+    border-radius: 10px;
+    background: #000;
+    display: none;
+    max-height: 320px;
+    object-fit: cover;
+  }
+  #canvas { display: none; }
+  .manual-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .manual-row input {
+    flex: 1;
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    font-size: 15px;
+  }
+  .manual-row button { width: auto; white-space: nowrap; }
+  .result-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .result-item:last-child { border-bottom: none; }
+  .result-name { font-size: 14px; word-break: break-word; padding-right: 10px; }
+  .result-path { font-size: 12px; color: var(--muted); }
+  .status { font-size: 14px; color: var(--muted); margin-top: 10px; }
+  .status.error { color: var(--danger); }
+  .status.success { color: var(--success); }
+  h2 { font-size: 15px; margin: 0 0 12px 0; }
+  .hidden { display: none !important; }
+  .spinner {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid #ccc;
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: middle;
+    margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .config-warning {
+    background: #fff7ed;
+    border: 1px solid #fdba74;
+    color: #9a3412;
+    padding: 12px;
+    border-radius: 10px;
+    font-size: 13px;
+    margin-bottom: 16px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Buscador de Isométricos</h1>
+  <span id="authStatus">Sin conectar</span>
+</header>
+
+<main>
+
+  <div id="configWarning" class="config-warning hidden">
+    ⚠️ Falta configurar <code>DROPBOX_APP_KEY</code> en el código (línea marcada como <code>CONFIGURA AQUÍ</code>). Ver la guía de despliegue.
+  </div>
+
+  <div class="card" id="loginCard">
+    <h2>Conexión con Dropbox</h2>
+    <p class="status" id="loginHint">Paso 1: toca el botón, se abre Dropbox en una pestaña nueva. Inicia sesión y aprueba el acceso.</p>
+    <button class="btn-primary" id="loginBtn">1. Abrir Dropbox y aprobar</button>
+    <p class="status" style="margin-top:14px;">Paso 2: Dropbox te va a mostrar un código en pantalla. Cópialo y pégalo aquí:</p>
+    <div class="manual-row">
+      <input type="text" id="authCodeInput" placeholder="Pega el código de Dropbox" autocomplete="off" autocapitalize="off" />
+      <button class="btn-secondary" id="confirmCodeBtn">Confirmar</button>
+    </div>
+    <p class="status" id="loginStatus"></p>
+  </div>
+
+  <div class="card hidden" id="scanCard">
+    <h2>Escanear código</h2>
+    <video id="video" playsinline muted></video>
+    <canvas id="canvas"></canvas>
+    <button class="btn-primary" id="scanBtn">Escanear con cámara</button>
+    <div class="manual-row">
+      <input type="text" id="manualInput" placeholder="O escribe el código, ej. ISO-1234" />
+      <button class="btn-secondary" id="manualBtn">Buscar</button>
+    </div>
+    <p class="status" id="scanStatus"></p>
+  </div>
+
+  <div class="card hidden" id="resultsCard">
+    <h2>Resultados</h2>
+    <div id="resultsList"></div>
+    <p class="status" id="resultsStatus"></p>
+  </div>
+
+  <div class="hidden" id="logoutWrap" style="text-align:center;">
+    <button class="btn-danger" id="logoutBtn">Desconectar Dropbox</button>
+  </div>
+
+</main>
+
+<script>
+/* =====================================================================
+   CONFIGURACIÓN — edita esta sección antes de publicar la app
+   ===================================================================== */
+const CONFIG = {
+  // CONFIGURA AQUÍ: pega el "App key" que te da Dropbox App Console.
+  DROPBOX_APP_KEY: "fdftgcmazyfkg55",
+};
+
+/* =====================================================================
+   Utilidades PKCE (OAuth2 sin necesidad de client secret)
+   ===================================================================== */
+function base64UrlEncode(buffer) {
+  return btoa(String.fromCharCode(...new Uint8Array(buffer)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function randomString(len = 64) {
+  const arr = new Uint8Array(len);
+  crypto.getRandomValues(arr);
+  return base64UrlEncode(arr.buffer);
+}
+async function sha256(str) {
+  const data = new TextEncoder().encode(str);
+  return await crypto.subtle.digest("SHA-256", data);
+}
+
+/* =====================================================================
+   Estado / almacenamiento local
+   ===================================================================== */
+const store = {
+  get accessToken() { return localStorage.getItem("dbx_access_token"); },
+  set accessToken(v) { v ? localStorage.setItem("dbx_access_token", v) : localStorage.removeItem("dbx_access_token"); },
+  get refreshToken() { return localStorage.getItem("dbx_refresh_token"); },
+  set refreshToken(v) { v ? localStorage.setItem("dbx_refresh_token", v) : localStorage.removeItem("dbx_refresh_token"); },
+  get expiresAt() { return Number(localStorage.getItem("dbx_expires_at") || 0); },
+  set expiresAt(v) { localStorage.setItem("dbx_expires_at", String(v)); },
+  get verifier() { return sessionStorage.getItem("dbx_pkce_verifier"); },
+  set verifier(v) { v ? sessionStorage.setItem("dbx_pkce_verifier", v) : sessionStorage.removeItem("dbx_pkce_verifier"); },
+};
+
+function isLoggedIn() {
+  return !!store.accessToken;
+}
+
+/* =====================================================================
+   Flujo OAuth2 PKCE con Dropbox — SIN redirect_uri
+   (Dropbox muestra el código en su propia página; el usuario lo copia
+   y lo pega en esta app. Así no hace falta registrar ninguna URL.)
+   ===================================================================== */
+async function startLogin() {
+  if (!CONFIG.DROPBOX_APP_KEY || CONFIG.DROPBOX_APP_KEY.includes("PON_TU_APP_KEY")) {
+    alert("Falta configurar DROPBOX_APP_KEY en el código antes de conectar.");
+    return;
+  }
+  const verifier = randomString(64);
+  store.verifier = verifier;
+  const challengeBuf = await sha256(verifier);
+  const challenge = base64UrlEncode(challengeBuf);
+
+  const params = new URLSearchParams({
+    client_id: CONFIG.DROPBOX_APP_KEY,
+    response_type: "code",
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    token_access_type: "offline",
+  });
+  window.open(`https://www.dropbox.com/oauth2/authorize?${params.toString()}`, "_blank");
+  document.getElementById("loginStatus").textContent =
+    "Se abrió Dropbox en otra pestaña. Después de aprobar, copia el código y pégalo abajo.";
+  document.getElementById("loginStatus").className = "status";
+}
+
+async function confirmAuthCode() {
+  const input = document.getElementById("authCodeInput");
+  const code = input.value.trim();
+  const loginStatus = document.getElementById("loginStatus");
+  if (!code) {
+    loginStatus.textContent = "Pega primero el código que te dio Dropbox.";
+    loginStatus.className = "status error";
+    return;
+  }
+  const verifier = store.verifier;
+  if (!verifier) {
+    loginStatus.textContent = "Primero toca \"1. Abrir Dropbox y aprobar\".";
+    loginStatus.className = "status error";
+    return;
+  }
+
+  loginStatus.innerHTML = `<span class="spinner"></span>Conectando...`;
+  loginStatus.className = "status";
+
+  try {
+    const body = new URLSearchParams({
+      code,
+      grant_type: "authorization_code",
+      client_id: CONFIG.DROPBOX_APP_KEY,
+      code_verifier: verifier,
+    });
+    const res = await fetch("https://api.dropboxapi.com/oauth2/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    store.accessToken = data.access_token;
+    store.refreshToken = data.refresh_token || store.refreshToken;
+    store.expiresAt = Date.now() + (data.expires_in - 60) * 1000;
+    store.verifier = null;
+    input.value = "";
+  } catch (err) {
+    console.error("Error de login Dropbox:", err);
+    loginStatus.textContent = "Código inválido o expirado. Vuelve a tocar \"1. Abrir Dropbox\" e intenta de nuevo.";
+    loginStatus.className = "status error";
+    return;
+  }
+  refreshUI();
+}
+
+async function refreshAccessTokenIfNeeded() {
+  if (!store.refreshToken) return;
+  if (Date.now() < store.expiresAt) return;
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: store.refreshToken,
+    client_id: CONFIG.DROPBOX_APP_KEY,
+  });
+  const res = await fetch("https://api.dropboxapi.com/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  if (!res.ok) {
+    logout();
+    throw new Error("Sesión expirada, vuelve a conectar Dropbox.");
+  }
+  const data = await res.json();
+  store.accessToken = data.access_token;
+  store.expiresAt = Date.now() + (data.expires_in - 60) * 1000;
+}
+
+function logout() {
+  store.accessToken = null;
+  store.refreshToken = null;
+  store.expiresAt = 0;
+  refreshUI();
+}
+
+/* =====================================================================
+   Llamadas a la API de Dropbox
+   ===================================================================== */
+async function dbxFetch(url, opts = {}) {
+  await refreshAccessTokenIfNeeded();
+  const res = await fetch(url, {
+    ...opts,
+    headers: {
+      ...(opts.headers || {}),
+      Authorization: `Bearer ${store.accessToken}`,
+      "Content-Type": "application/json",
+    },
+  });
+  if (res.status === 401) {
+    logout();
+    throw new Error("Sesión expirada, vuelve a conectar Dropbox.");
+  }
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function searchIsometrico(code) {
+  const data = await dbxFetch("https://api.dropboxapi.com/2/files/search_v2", {
+    method: "POST",
+    body: JSON.stringify({
+      query: code,
+      options: { filename_only: true, max_results: 20 },
+    }),
+  });
+  return (data.matches || [])
+    .map((m) => m.metadata && m.metadata.metadata)
+    .filter((m) => m && m[".tag"] === "file");
+}
+
+async function getTemporaryLink(path) {
+  const data = await dbxFetch("https://api.dropboxapi.com/2/files/get_temporary_link", {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  });
+  return data.link;
+}
+
+/* =====================================================================
+   Escaneo por cámara (jsQR)
+   ===================================================================== */
+let scanning = false;
+let mediaStream = null;
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+async function startScan() {
+  const scanStatus = document.getElementById("scanStatus");
+  scanStatus.textContent = "";
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } },
+    });
+  } catch (err) {
+    scanStatus.textContent = "No se pudo acceder a la cámara: " + err.message;
+    scanStatus.className = "status error";
+    return;
+  }
+  video.srcObject = mediaStream;
+  video.style.display = "block";
+  await video.play();
+  scanning = true;
+  requestAnimationFrame(scanFrame);
+}
+
+function stopScan() {
+  scanning = false;
+  video.style.display = "none";
+  if (mediaStream) {
+    mediaStream.getTracks().forEach((t) => t.stop());
+    mediaStream = null;
+  }
+}
+
+function scanFrame() {
+  if (!scanning) return;
+  if (video.readyState === video.HAVE_ENOUGH_DATA) {
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const qr = jsQR(imageData.data, imageData.width, imageData.height);
+    if (qr && qr.data) {
+      stopScan();
+      document.getElementById("scanStatus").textContent = `Código leído: ${qr.data}`;
+      document.getElementById("scanStatus").className = "status success";
+      runSearch(qr.data.trim());
+      return;
+    }
+  }
+  requestAnimationFrame(scanFrame);
+}
+
+/* =====================================================================
+   Búsqueda y render de resultados
+   ===================================================================== */
+async function runSearch(code) {
+  if (!code) return;
+  const resultsCard = document.getElementById("resultsCard");
+  const resultsList = document.getElementById("resultsList");
+  const resultsStatus = document.getElementById("resultsStatus");
+  resultsCard.classList.remove("hidden");
+  resultsList.innerHTML = "";
+  resultsStatus.innerHTML = `<span class="spinner"></span>Buscando "${code}" en Dropbox...`;
+  resultsStatus.className = "status";
+
+  try {
+    const matches = await searchIsometrico(code);
+    if (matches.length === 0) {
+      resultsStatus.textContent = `No se encontró ningún archivo para "${code}".`;
+      resultsStatus.className = "status error";
+      return;
+    }
+    resultsStatus.textContent = `${matches.length} resultado(s) para "${code}".`;
+    matches.forEach((m) => renderResultItem(m, resultsList));
+
+    if (matches.length === 1) {
+      openFile(matches[0].path_lower);
+    }
+  } catch (err) {
+    resultsStatus.textContent = "Error al buscar: " + err.message;
+    resultsStatus.className = "status error";
+  }
+}
+
+function renderResultItem(meta, container) {
+  const row = document.createElement("div");
+  row.className = "result-item";
+  row.innerHTML = `
+    <div>
+      <div class="result-name">${meta.name}</div>
+      <div class="result-path">${meta.path_display || ""}</div>
+    </div>
+    <button class="btn-secondary" style="width:auto;">Abrir</button>
+  `;
+  row.querySelector("button").addEventListener("click", () => openFile(meta.path_lower));
+  container.appendChild(row);
+}
+
+async function openFile(path) {
+  const resultsStatus = document.getElementById("resultsStatus");
+  try {
+    const link = await getTemporaryLink(path);
+    window.open(link, "_blank");
+  } catch (err) {
+    resultsStatus.textContent = "No se pudo abrir el archivo: " + err.message;
+    resultsStatus.className = "status error";
+  }
+}
+
+/* =====================================================================
+   UI wiring
+   ===================================================================== */
+function refreshUI() {
+  const logged = isLoggedIn();
+  document.getElementById("authStatus").textContent = logged ? "Conectado" : "Sin conectar";
+  document.getElementById("loginCard").classList.toggle("hidden", logged);
+  document.getElementById("scanCard").classList.toggle("hidden", !logged);
+  document.getElementById("logoutWrap").classList.toggle("hidden", !logged);
+  if (!logged) document.getElementById("resultsCard").classList.add("hidden");
+
+  const missingKey = !CONFIG.DROPBOX_APP_KEY || CONFIG.DROPBOX_APP_KEY.includes("PON_TU_APP_KEY");
+  document.getElementById("configWarning").classList.toggle("hidden", !missingKey);
+}
+
+document.getElementById("loginBtn").addEventListener("click", startLogin);
+document.getElementById("confirmCodeBtn").addEventListener("click", confirmAuthCode);
+document.getElementById("authCodeInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") confirmAuthCode();
+});
+document.getElementById("logoutBtn").addEventListener("click", logout);
+document.getElementById("scanBtn").addEventListener("click", () => {
+  if (scanning) { stopScan(); document.getElementById("scanBtn").textContent = "Escanear con cámara"; }
+  else { startScan(); document.getElementById("scanBtn").textContent = "Detener cámara"; }
+});
+document.getElementById("manualBtn").addEventListener("click", () => {
+  const val = document.getElementById("manualInput").value.trim();
+  if (val) runSearch(val);
+});
+document.getElementById("manualInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") document.getElementById("manualBtn").click();
+});
+
+(function init() {
+  refreshUI();
+})();
+</script>
+
+</body>
+</html>
