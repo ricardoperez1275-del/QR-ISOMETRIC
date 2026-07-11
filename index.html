@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
 <title>Buscador de Isométricos</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsqr/1.4.0/jsQR.js"></script>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <style>
   :root {
     --primary: #1a56db;
@@ -67,27 +67,14 @@
   .btn-secondary { background: #eef0f4; color: var(--text); width: 100%; }
   .btn-danger { background: transparent; color: var(--danger); font-size: 13px; padding: 6px 10px; }
   .btn-link { background: transparent; color: var(--primary); font-size: 13px; padding: 6px 10px; text-decoration: underline; }
-  #video {
+  #reader {
     width: 100%;
     border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 8px;
     background: #000;
-    display: block;
-    max-height: 320px;
-    object-fit: cover;
+    min-height: 200px;
   }
-  #scanGuide {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    width: 55%;
-    aspect-ratio: 1 / 1;
-    border: 3px solid rgba(255,255,255,0.85);
-    border-radius: 12px;
-    box-shadow: 0 0 0 999px rgba(0,0,0,0.25);
-    pointer-events: none;
-  }
-  #canvas { display: none; }
   .manual-row {
     display: flex;
     gap: 8px;
@@ -165,19 +152,8 @@
 
   <div class="card hidden" id="scanCard">
     <h2>Escanear código</h2>
-    <div id="videoWrap" style="position:relative; display:none;">
-      <video id="video" playsinline muted></video>
-      <div id="scanGuide"></div>
-    </div>
-    <canvas id="canvas"></canvas>
+    <div id="reader"></div>
     <button class="btn-primary" id="scanBtn">Escanear con cámara</button>
-    <div id="cameraControls" class="hidden" style="margin-top:10px;">
-      <div id="zoomControl">
-        <label class="status" style="display:block; margin-bottom:4px;">Zoom digital (mueve para acercar el recuadro)</label>
-        <input type="range" id="zoomSlider" min="1" max="4" step="0.1" value="1.5" style="width:100%;" />
-      </div>
-      <button class="btn-secondary" id="torchBtn" style="margin-top:8px; display:none;">💡 Linterna</button>
-    </div>
     <div class="manual-row">
       <input type="text" id="manualInput" placeholder="O escribe el código, ej. ISO-1234" />
       <button class="btn-secondary" id="manualBtn">Buscar</button>
@@ -388,141 +364,63 @@ async function getTemporaryLink(path) {
 }
 
 /* =====================================================================
-   Escaneo por cámara
-   - Usa el detector nativo del navegador (BarcodeDetector) cuando existe:
-     es mucho más tolerante a ángulo, brillo y desenfoque que una librería
-     JS pura. Si no está disponible (algunos navegadores viejos), usa jsQR.
-   - "Zoom digital": recorta el centro del video y lo agranda antes de
-     analizarlo. Funciona en cualquier teléfono, a diferencia del zoom de
-     hardware (que Safari/iOS no expone a las apps web).
+   Escaneo por cámara — Html5Qrcode
+   (misma librería que ya te funciona en tu app de inventario; es más
+   confiable que decodificar cuadro por cuadro a mano.)
    ===================================================================== */
 let scanning = false;
-let mediaStream = null;
-let torchOn = false;
-let softZoom = 1.5;
-let detecting = false;
-const video = document.getElementById("video");
-const canvas = document.getElementById("canvas");
-const ctx = canvas.getContext("2d", { willReadFrequently: true });
+let qrScanner = null;
+let ultimoCodigo = "";
+let ultimoTiempo = 0;
 
-let barcodeDetector = null;
-if ("BarcodeDetector" in window) {
-  try {
-    barcodeDetector = new BarcodeDetector({ formats: ["qr_code"] });
-  } catch {
-    barcodeDetector = null;
-  }
-}
-
-async function startScan() {
+function startScan() {
   const scanStatus = document.getElementById("scanStatus");
-  const videoWrap = document.getElementById("videoWrap");
-  const cameraControls = document.getElementById("cameraControls");
-  const zoomSlider = document.getElementById("zoomSlider");
-  const torchBtn = document.getElementById("torchBtn");
   scanStatus.textContent = "";
-  try {
-    // Pedimos resolución alta: entre más nítido el video, mejor funciona
-    // el zoom digital (recorte) sin perder calidad.
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: "environment" },
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
-      },
+  if (scanning) return;
+  qrScanner = new Html5Qrcode("reader");
+  qrScanner
+    .start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: 250 },
+      onScanSuccess,
+      function () { /* ignorar cuadros sin QR */ }
+    )
+    .then(() => {
+      scanning = true;
+    })
+    .catch((err) => {
+      scanStatus.textContent = "No se pudo acceder a la cámara: " + err;
+      scanStatus.className = "status error";
     });
-  } catch (err) {
-    scanStatus.textContent = "No se pudo acceder a la cámara: " + err.message;
-    scanStatus.className = "status error";
-    return;
-  }
-  video.srcObject = mediaStream;
-  videoWrap.style.display = "block";
-  await video.play();
-  scanning = true;
-  detecting = false;
-  requestAnimationFrame(scanFrame);
-
-  cameraControls.classList.remove("hidden");
-  softZoom = Number(zoomSlider.value) || 1.5;
-  zoomSlider.oninput = () => {
-    softZoom = Number(zoomSlider.value);
-  };
-
-  // Linterna: solo algunos navegadores (Chrome/Android) la exponen.
-  const [track] = mediaStream.getVideoTracks();
-  const caps = track.getCapabilities ? track.getCapabilities() : {};
-  if (caps.torch) {
-    torchOn = false;
-    torchBtn.style.display = "inline-block";
-    torchBtn.textContent = "💡 Linterna";
-    torchBtn.onclick = () => {
-      torchOn = !torchOn;
-      track.applyConstraints({ advanced: [{ torch: torchOn }] }).catch(() => {});
-      torchBtn.textContent = torchOn ? "💡 Apagar linterna" : "💡 Linterna";
-    };
-  } else {
-    torchBtn.style.display = "none";
-  }
 }
 
 function stopScan() {
-  scanning = false;
-  detecting = false;
-  document.getElementById("videoWrap").style.display = "none";
-  document.getElementById("cameraControls").classList.add("hidden");
-  if (mediaStream) {
-    mediaStream.getTracks().forEach((t) => t.stop());
-    mediaStream = null;
-  }
+  if (!scanning || !qrScanner) return;
+  qrScanner
+    .stop()
+    .then(() => {
+      qrScanner.clear();
+      scanning = false;
+    })
+    .catch(() => {
+      scanning = false;
+    });
 }
 
-// Recorta el centro del video según el zoom digital y lo dibuja
-// agrandado en el canvas de trabajo. Devuelve false si el video aún
-// no tiene frames listos.
-function drawZoomedFrame() {
-  const vw = video.videoWidth, vh = video.videoHeight;
-  if (!vw || !vh) return false;
-  const cropSize = Math.min(vw, vh) / softZoom;
-  const sx = (vw - cropSize) / 2;
-  const sy = (vh - cropSize) / 2;
-  const outSize = 700;
-  canvas.width = outSize;
-  canvas.height = outSize;
-  ctx.drawImage(video, sx, sy, cropSize, cropSize, 0, 0, outSize, outSize);
-  return true;
-}
+function onScanSuccess(decodedText) {
+  const ahora = Date.now();
+  // Evita procesar el mismo código varias veces seguidas por vibración
+  // de la cámara mientras se mantiene apuntando.
+  if (decodedText === ultimoCodigo && ahora - ultimoTiempo < 3000) return;
+  ultimoCodigo = decodedText;
+  ultimoTiempo = ahora;
 
-async function scanFrame() {
-  if (!scanning) return;
-  if (!detecting && video.readyState === video.HAVE_ENOUGH_DATA && drawZoomedFrame()) {
-    detecting = true;
-    let value = null;
-    try {
-      if (barcodeDetector) {
-        const codes = await barcodeDetector.detect(canvas);
-        if (codes && codes.length) value = codes[0].rawValue;
-      }
-      if (!value) {
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const qr = jsQR(imageData.data, imageData.width, imageData.height, {
-          inversionAttempts: "attemptBoth",
-        });
-        if (qr && qr.data) value = qr.data;
-      }
-    } catch (err) {
-      console.error("Error escaneando:", err);
-    }
-    if (value) {
-      stopScan();
-      document.getElementById("scanStatus").textContent = `Código leído: ${value}`;
-      document.getElementById("scanStatus").className = "status success";
-      runSearch(value.trim());
-      return;
-    }
-    detecting = false;
-  }
-  requestAnimationFrame(scanFrame);
+  document.getElementById("scanStatus").textContent = `Código leído: ${decodedText}`;
+  document.getElementById("scanStatus").className = "status success";
+  if (navigator.vibrate) navigator.vibrate(120);
+  stopScan();
+  document.getElementById("scanBtn").textContent = "Escanear con cámara";
+  runSearch(decodedText.trim());
 }
 
 /* =====================================================================
