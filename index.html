@@ -172,9 +172,9 @@
     <canvas id="canvas"></canvas>
     <button class="btn-primary" id="scanBtn">Escanear con cámara</button>
     <div id="cameraControls" class="hidden" style="margin-top:10px;">
-      <div id="zoomControl" class="hidden">
-        <label class="status" style="display:block; margin-bottom:4px;">Zoom (acércate sin mover el teléfono)</label>
-        <input type="range" id="zoomSlider" min="1" max="5" step="0.1" value="1" style="width:100%;" />
+      <div id="zoomControl">
+        <label class="status" style="display:block; margin-bottom:4px;">Zoom digital (mueve para acercar el recuadro)</label>
+        <input type="range" id="zoomSlider" min="1" max="4" step="0.1" value="1.5" style="width:100%;" />
       </div>
       <button class="btn-secondary" id="torchBtn" style="margin-top:8px; display:none;">💡 Linterna</button>
     </div>
@@ -388,26 +388,42 @@ async function getTemporaryLink(path) {
 }
 
 /* =====================================================================
-   Escaneo por cámara (jsQR)
+   Escaneo por cámara
+   - Usa el detector nativo del navegador (BarcodeDetector) cuando existe:
+     es mucho más tolerante a ángulo, brillo y desenfoque que una librería
+     JS pura. Si no está disponible (algunos navegadores viejos), usa jsQR.
+   - "Zoom digital": recorta el centro del video y lo agranda antes de
+     analizarlo. Funciona en cualquier teléfono, a diferencia del zoom de
+     hardware (que Safari/iOS no expone a las apps web).
    ===================================================================== */
 let scanning = false;
 let mediaStream = null;
 let torchOn = false;
+let softZoom = 1.5;
+let detecting = false;
 const video = document.getElementById("video");
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+let barcodeDetector = null;
+if ("BarcodeDetector" in window) {
+  try {
+    barcodeDetector = new BarcodeDetector({ formats: ["qr_code"] });
+  } catch {
+    barcodeDetector = null;
+  }
+}
 
 async function startScan() {
   const scanStatus = document.getElementById("scanStatus");
   const videoWrap = document.getElementById("videoWrap");
   const cameraControls = document.getElementById("cameraControls");
-  const zoomControl = document.getElementById("zoomControl");
   const zoomSlider = document.getElementById("zoomSlider");
   const torchBtn = document.getElementById("torchBtn");
   scanStatus.textContent = "";
   try {
-    // Pedimos resolución alta: entre más nítido el video, más fácil se lee
-    // un QR pequeño sin tener que pegar el teléfono a la etiqueta.
+    // Pedimos resolución alta: entre más nítido el video, mejor funciona
+    // el zoom digital (recorte) sin perder calidad.
     mediaStream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: { ideal: "environment" },
@@ -424,26 +440,18 @@ async function startScan() {
   videoWrap.style.display = "block";
   await video.play();
   scanning = true;
+  detecting = false;
   requestAnimationFrame(scanFrame);
 
-  // Configurar zoom y linterna si el teléfono los soporta.
   cameraControls.classList.remove("hidden");
+  softZoom = Number(zoomSlider.value) || 1.5;
+  zoomSlider.oninput = () => {
+    softZoom = Number(zoomSlider.value);
+  };
+
+  // Linterna: solo algunos navegadores (Chrome/Android) la exponen.
   const [track] = mediaStream.getVideoTracks();
   const caps = track.getCapabilities ? track.getCapabilities() : {};
-
-  if (caps.zoom) {
-    zoomControl.classList.remove("hidden");
-    zoomSlider.min = caps.zoom.min;
-    zoomSlider.max = caps.zoom.max;
-    zoomSlider.step = caps.zoom.step || 0.1;
-    zoomSlider.value = caps.zoom.min;
-    zoomSlider.oninput = () => {
-      track.applyConstraints({ advanced: [{ zoom: Number(zoomSlider.value) }] }).catch(() => {});
-    };
-  } else {
-    zoomControl.classList.add("hidden");
-  }
-
   if (caps.torch) {
     torchOn = false;
     torchBtn.style.display = "inline-block";
@@ -460,6 +468,7 @@ async function startScan() {
 
 function stopScan() {
   scanning = false;
+  detecting = false;
   document.getElementById("videoWrap").style.display = "none";
   document.getElementById("cameraControls").classList.add("hidden");
   if (mediaStream) {
@@ -468,21 +477,50 @@ function stopScan() {
   }
 }
 
-function scanFrame() {
+// Recorta el centro del video según el zoom digital y lo dibuja
+// agrandado en el canvas de trabajo. Devuelve false si el video aún
+// no tiene frames listos.
+function drawZoomedFrame() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return false;
+  const cropSize = Math.min(vw, vh) / softZoom;
+  const sx = (vw - cropSize) / 2;
+  const sy = (vh - cropSize) / 2;
+  const outSize = 700;
+  canvas.width = outSize;
+  canvas.height = outSize;
+  ctx.drawImage(video, sx, sy, cropSize, cropSize, 0, 0, outSize, outSize);
+  return true;
+}
+
+async function scanFrame() {
   if (!scanning) return;
-  if (video.readyState === video.HAVE_ENOUGH_DATA) {
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const qr = jsQR(imageData.data, imageData.width, imageData.height);
-    if (qr && qr.data) {
+  if (!detecting && video.readyState === video.HAVE_ENOUGH_DATA && drawZoomedFrame()) {
+    detecting = true;
+    let value = null;
+    try {
+      if (barcodeDetector) {
+        const codes = await barcodeDetector.detect(canvas);
+        if (codes && codes.length) value = codes[0].rawValue;
+      }
+      if (!value) {
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const qr = jsQR(imageData.data, imageData.width, imageData.height, {
+          inversionAttempts: "attemptBoth",
+        });
+        if (qr && qr.data) value = qr.data;
+      }
+    } catch (err) {
+      console.error("Error escaneando:", err);
+    }
+    if (value) {
       stopScan();
-      document.getElementById("scanStatus").textContent = `Código leído: ${qr.data}`;
+      document.getElementById("scanStatus").textContent = `Código leído: ${value}`;
       document.getElementById("scanStatus").className = "status success";
-      runSearch(qr.data.trim());
+      runSearch(value.trim());
       return;
     }
+    detecting = false;
   }
   requestAnimationFrame(scanFrame);
 }
